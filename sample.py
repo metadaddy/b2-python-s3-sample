@@ -31,7 +31,7 @@ file1 = "beach.jpg"     # Sample Data - files in public Bucket with Sample Data
 file1_pri = "beach3.jpg"
 file2 = "coconuts.jpg"
 file3 = "sunset.jpg"
-LOCAL_DIR = 'C:\\tmp'  # <-- Make sure this directory exists on your local machine; adjust name per your operating system
+LOCAL_DIR = '.'  # <-- Current directory by default, you can change this to any directory that exists
 
 WEEK_IN_SECONDS = 604800
 
@@ -48,11 +48,10 @@ def copy_file(source_bucket, destination_bucket, source_key, destination_key, b2
 
 
 # Create the specified bucket on B2
-def create_bucket(name, b2, secure=False):
+def create_bucket(name, b2, private=False):
     try:
-        b2.create_bucket(Bucket=name)
-        if secure:
-            prevent_public_access(name, b2)
+        acl = 'private' if private else 'public-read'
+        b2.create_bucket(Bucket=name, ACL=acl)
     except ClientError as ce:
         print('error', ce)
 
@@ -76,25 +75,22 @@ def delete_files(bucket, keys, b2):
         print('error', ce)
 
 
-# Delete the specified object from B2 - all versions
+# Delete the specified objects from B2 - all versions
 def delete_files_all_versions(bucket, keys, client):
-    objects = []
+    objects_to_delete = []
+    paginator = client.get_paginator('list_object_versions')
     for key in keys:
-        objects.append({'Key': key})
-    try:
-        # SOURCE re LOGIC FOLLOWING:  https://stackoverflow.com/questions/46819590/delete-all-versions-of-an-object-in-s3-using-python
-        paginator = client.get_paginator('list_object_versions')
-        response_iterator = paginator.paginate(Bucket=bucket)
+        response_iterator = paginator.paginate(Bucket=bucket, Prefix=key)
         for response in response_iterator:
             versions = response.get('Versions', [])
             versions.extend(response.get('DeleteMarkers', []))
-            for version_id in [x['VersionId'] for x in versions
-                               if x['Key'] == key and x['VersionId'] != 'null']:
-                print('Deleting {} version {}'.format(key, version_id))
-                client.delete_object(Bucket=bucket, Key=key, VersionId=version_id)
-
-    except ClientError as ce:
-        print('error', ce)
+            objects_to_delete.extend([{'Key': key, 'VersionId': v['VersionId']} for v in versions])
+    versions_to_delete = [o['VersionId'] for o in objects_to_delete]
+    print(f'Deleting {key}, versions:')
+    for v in versions_to_delete:
+        print(v)
+    # You can delete up to 1000 objects in a single delete_objects call
+    client.delete_objects(Bucket=bucket, Delete={'Objects': objects_to_delete})
 
 # Download the specified object from B2 and write to local file system
 def download_file(bucket, directory, local_name, key_name, b2):
@@ -192,10 +188,8 @@ def upload_file(bucket, directory, file, b2, b2path=None):
     remote_path = b2path
     if remote_path is None:
         remote_path = file
-    try:
-        response = b2.Bucket(bucket).upload_file(file_path, remote_path)
-    except ClientError as ce:
-        print('error', ce)
+
+    response = b2.Bucket(bucket).upload_file(file_path, remote_path)
 
     return response
 
@@ -295,106 +289,129 @@ def main():
                       b2 = b2_private)
 
 
-    # 20 - CREATE BUCKET - *SUCCESS*
-    elif len(args) == 1 and args[0] == '20':
+    # WRITE OPERATIONS - THIS BLOCK CREATES B2 OBJECTS THAT SUPPORT WRITE OPERATIONS FOR BUCKETS IN YOUR ACCOUNT
+    if len(args) == 1 and args[0] >= '20':
+        endpoint_rw = os.getenv("ENDPOINT_URL_YOUR_BUCKET")  # getting environment variables from file .env
+        key_id_rw = os.getenv("KEY_ID_YOUR_ACCOUNT")  # getting environment variables from file .env
+        application_key_rw = os.getenv("APPLICATION_KEY_YOUR_ACCOUNT")  # getting environment variables from file .env
+        # Call function to return reference to B2 service
+        b2_rw = get_b2_resource(endpoint_rw, key_id_rw, application_key_rw)
 
-        print('BEFORE CREATE NEW BUCKET NAMED:  ',NEW_BUCKET_NAME )
-        list_buckets( b2_client )
+        client_rw = boto3.client(service_name='s3',
+                                 endpoint_url=endpoint_rw,
+                                 aws_access_key_id=key_id_rw,
+                                 aws_secret_access_key=application_key_rw)
 
-        b2 = b2_rw
+        # 20 - CREATE BUCKET - *SUCCESS*
+        if len(args) == 1 and args[0] == '20':
 
-        #  How To Here:  https://help.backblaze.com/hc/en-us/articles/360047629793-How-to-use-the-AWS-SDK-for-Python-with-B2-
-        response = b2.create_bucket( Bucket=NEW_BUCKET_NAME )
+            print('BEFORE CREATE NEW BUCKET NAMED:  ',NEW_BUCKET_NAME )
+            list_buckets( client_rw )
 
-        print('RESPONSE:  ', response)
+            b2 = b2_rw
 
-        print('\nAFTER CREATE BUCKET')
-        list_buckets( b2_client )
+            #  How To Here:  https://help.backblaze.com/hc/en-us/articles/360047629793-How-to-use-the-AWS-SDK-for-Python-with-B2-
+            response = b2.create_bucket( Bucket=NEW_BUCKET_NAME )
 
-    # 21 - UPLOAD FILE
-    elif len(args) == 1 and args[0] == '21':
+            print('RESPONSE:  ', response)
 
-        b2 = b2_rw
+            print('\nAFTER CREATE BUCKET')
+            list_buckets( client_rw )
 
-        response = upload_file(NEW_BUCKET_NAME, LOCAL_DIR, file1, b2)
+        # 21 - UPLOAD FILE
+        elif len(args) == 1 and args[0] == '21':
 
-        print('RESPONSE:  ', response)
+            b2 = b2_rw
 
-        generate_friendly_url( NEW_BUCKET_NAME, endpoint, b2)
+            response = upload_file(NEW_BUCKET_NAME, LOCAL_DIR, file1_pri, b2)
 
+            print('RESPONSE:  ', response)
 
-    # 22 - Copy File Between Buckets
-    elif len(args) == 1 and args[0] == '22':
-
-        b2 = b2_rw
-
-        response = b2.create_bucket( Bucket=TRANSIENT_BUCKET_NAME )
-
-        list_buckets( b2_client )
-
-        print('\nBEFORE CONTENTS BUCKET ', TRANSIENT_BUCKET_NAME)
-        copy_file(NEW_BUCKET_NAME, TRANSIENT_BUCKET_NAME, file1, file1, b2)
-
-        print('\nAFTER CONTENTS BUCKET ', TRANSIENT_BUCKET_NAME)
-        my_bucket = b2.Bucket(TRANSIENT_BUCKET_NAME)
-        for my_bucket_object in my_bucket.objects.all():
-            print(my_bucket_object.key)
-
-    # 30 - Delete File
-    elif len(args) == 1 and args[0] == '30':
-        print('BEFORE - Bucket Contents ')
-        my_bucket = b2.Bucket(NEW_BUCKET_NAME)
-        for my_bucket_object in my_bucket.objects.all():
-            print(my_bucket_object.key)
-
-        print('File Name to Delete:  ', file1)
-
-        b2 = b2_rw
-
-        delete_files(NEW_BUCKET_NAME, [file1], b2)
-
-        print('\nAFTER - Bucket Contents ')
-        my_bucket = b2.Bucket(NEW_BUCKET_NAME)
-        for my_bucket_object in my_bucket.objects.all():
-            print(my_bucket_object.key)
-
-    # 31 - Delete File all versions
-    elif len(args) == 1 and args[0] == '31':
-        print('BEFORE - Bucket Contents ')
-        b2 = b2_rw
-        my_bucket = b2.Bucket(NEW_BUCKET_NAME)
-        for my_bucket_object in my_bucket.objects.all():
-            print(my_bucket_object.key)
-
-        print('File Name to Delete:  ', file1)
-
-        b2_client = b2_client_rw
-
-        delete_files_all_versions(NEW_BUCKET_NAME,
-                                  [file1],
-                                  b2_client )
-
-        print('\nAFTER - Bucket Contents ')
-        my_bucket = b2.Bucket(NEW_BUCKET_NAME)
-        for my_bucket_object in my_bucket.objects.all():
-            print(my_bucket_object.key)
+            print(f'UPLOADED {file1_pri} to {NEW_BUCKET_NAME}')
 
 
-    # Cannot delete non-empty bucket - error An error occurred (BucketNotEmpty) when calling the DeleteBucket operation:
-    # 32 - Delete Bucket
-    elif len(args) == 1 and args[0] == '32':
+        # 22 - Copy File Between Buckets
+        elif len(args) == 1 and args[0] == '22':
 
-        print('BEFORE - Buckets ')
-        list_buckets( b2_client )
+            b2 = b2_rw
 
-        print('Bucket Name to Delete:  ', NEW_BUCKET_NAME)
+            try:
+                b2.create_bucket( Bucket=TRANSIENT_BUCKET_NAME )
+            except ClientError as e:
+                if e.response['Error']['Code'] == 'BucketAlreadyOwnedByYou':
+                    print(f'Bucket {TRANSIENT_BUCKET_NAME} already exists.\nTo run this operation,'
+                          f' you must first remove the bucket contents, then the bucket itself.')
+                    return
+                raise
 
-        b2 = b2_rw
+            client = client_rw
 
-        delete_bucket(NEW_BUCKET_NAME, b2)
+            list_buckets( client )
 
-        print('\nAFTER - Buckets ')
-        list_buckets( b2_client )
+            print('\nBEFORE CONTENTS BUCKET ', TRANSIENT_BUCKET_NAME)
+            copy_file(NEW_BUCKET_NAME, TRANSIENT_BUCKET_NAME, file1_pri, file1_pri, b2)
+
+            print('\nAFTER CONTENTS BUCKET ', TRANSIENT_BUCKET_NAME)
+            my_bucket = b2.Bucket(TRANSIENT_BUCKET_NAME)
+            for my_bucket_object in my_bucket.objects.all():
+                print(my_bucket_object.key)
+
+        # 30 - Delete File
+        elif len(args) == 1 and args[0] == '30':
+            print('BEFORE - Bucket Contents ')
+            b2 = b2_rw
+            my_bucket = b2.Bucket(NEW_BUCKET_NAME)
+            for my_bucket_object in my_bucket.objects.all():
+                print(my_bucket_object.key)
+
+            print('File Name to Delete:  ', file1_pri)
+
+            delete_files(NEW_BUCKET_NAME, [file1_pri], b2)
+
+            print('\nAFTER - Bucket Contents ')
+            my_bucket = b2.Bucket(NEW_BUCKET_NAME)
+            for my_bucket_object in my_bucket.objects.all():
+                print(my_bucket_object.key)
+
+        # 31 - Delete File all versions
+        elif len(args) == 1 and args[0] == '31':
+            print('BEFORE - Bucket Contents ')
+            b2 = b2_rw
+            my_bucket = b2.Bucket(NEW_BUCKET_NAME)
+            for my_bucket_object in my_bucket.object_versions.all():
+                print(f'KEY: {my_bucket_object.object_key}, ID: {my_bucket_object.id}')
+
+            print('File Name to Delete (all versions):  ', file1_pri)
+
+            client = client_rw
+
+            delete_files_all_versions(NEW_BUCKET_NAME,
+                                      [file1_pri],
+                                      client )
+
+            print('\nAFTER - Bucket Contents ')
+            my_bucket = b2.Bucket(NEW_BUCKET_NAME)
+            for my_bucket_object in my_bucket.object_versions.all():
+                print(f'KEY: {my_bucket_object.object_key}, ID: {my_bucket_object.id}')
+
+
+        # Cannot delete non-empty bucket - error An error occurred (BucketNotEmpty) when calling the DeleteBucket operation:
+        # 32 - Delete Bucket
+        elif len(args) == 1 and args[0] == '32':
+
+            client = client_rw
+
+            print('BEFORE - Buckets ')
+            list_buckets( client )
+
+            print('Bucket Name to Delete:  ', NEW_BUCKET_NAME)
+
+            b2 = b2_rw
+
+            delete_bucket(NEW_BUCKET_NAME, b2)
+
+            print('\nAFTER - Buckets ')
+            list_buckets( client )
 
 
 # Optional (not strictly required)
